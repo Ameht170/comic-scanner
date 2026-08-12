@@ -71,6 +71,175 @@
     <script type="text/babel">
         const { useState, useEffect, useRef } = React;
 
+        const Notification = ({ message, type, onClose }) => {
+            useEffect(() => {
+                const timer = setTimeout(onClose, 3000);
+                return () => clearTimeout(timer);
+            }, [onClose, message]);
+
+            const bgColor = type === 'error' ? 'bg-rose-500' : type === 'success' ? 'bg-emerald-500' : 'bg-blue-500';
+            
+            return (
+                <div className={`fixed top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-lg text-white text-sm font-bold shadow-lg shadow-black/50 ${bgColor}`}>
+                    {message}
+                </div>
+            );
+        };
+
+        const Scanner = ({ onScan }) => {
+            useEffect(() => {
+                const scanner = new Html5QrcodeScanner("reader", { 
+                    qrbox: { width: 250, height: 150 }, 
+                    fps: 10 
+                });
+                
+                scanner.render((text) => {
+                    scanner.clear();
+                    onScan(text);
+                }, (error) => {
+                    // Ignore background scanning errors
+                });
+
+                return () => { 
+                    try {
+                        scanner.clear();
+                    } catch (e) {
+                        console.error("Scanner cleanup error:", e);
+                    }
+                };
+            }, [onScan]);
+
+            return <div id="reader" className="w-full bg-black rounded-xl overflow-hidden aspect-[4/3] flex items-center justify-center border border-slate-700"></div>;
+        };
+
+        const CoverScanner = ({ onScanResult }) => {
+            const videoRef = useRef(null);
+            const canvasRef = useRef(null);
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [stream, setStream] = useState(null);
+            const [errorMsg, setErrorMsg] = useState('');
+
+            useEffect(() => {
+                startCamera();
+                return () => stopCamera();
+            }, []);
+
+            const startCamera = async () => {
+                try {
+                    const mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment' } 
+                    });
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = mediaStream;
+                    }
+                    setStream(mediaStream);
+                    setErrorMsg('');
+                } catch (err) {
+                    setErrorMsg('Camera access denied. Check browser permissions.');
+                }
+            };
+
+            const stopCamera = () => {
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+            };
+
+            const captureAndAnalyze = async () => {
+                const geminiKey = localStorage.getItem('geminiApiKey');
+                if (!geminiKey) {
+                    setErrorMsg('Gemini API key is required in Settings for AI Scanning.');
+                    return;
+                }
+
+                setIsAnalyzing(true);
+                const video = videoRef.current;
+                const canvas = canvasRef.current;
+                const context = canvas.getContext('2d');
+                
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                
+                // Get base64 string
+                const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+                try {
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${geminiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{
+                                parts: [
+                                    { text: "Analyze this comic book cover. Return ONLY a JSON object with the following keys: title (string), issue (string, include #), publisher (string), year (number), rarity (string, e.g. 'Standard', 'Variant Cover', 'Key Issue'), price (number, estimated raw value). Do not include any markdown formatting, just the raw JSON." },
+                                    { inlineData: { mimeType: "image/jpeg", data: base64Image } }
+                                ]
+                            }]
+                        })
+                    });
+                    
+                    const data = await response.json();
+                    if (data.error) throw new Error(data.error.message);
+                    
+                    let resultText = data.candidates[0].content.parts[0].text;
+                    resultText = resultText.replace(/```json/g, '').replace(/```/g, '').trim(); // Clean JSON
+                    
+                    const parsed = JSON.parse(resultText);
+                    
+                    const comicData = {
+                        id: `AI-${Date.now().toString().slice(-6)}`,
+                        title: parsed.title || 'Unknown Title',
+                        issue: parsed.issue || '#1',
+                        publisher: parsed.publisher || 'Unknown Publisher',
+                        year: parsed.year || new Date().getFullYear(),
+                        rarity: parsed.rarity || 'Standard',
+                        price: parseFloat(parsed.price || 0),
+                        scannedAt: new Date().toISOString(),
+                        isMock: false
+                    };
+                    
+                    onScanResult(comicData);
+                } catch (err) {
+                    console.error(err);
+                    setErrorMsg('Failed to analyze image. Ensure your key is valid and image is clear.');
+                } finally {
+                    setIsAnalyzing(false);
+                }
+            };
+
+            return (
+                <div className="flex flex-col space-y-4 animate-fade-in">
+                    {errorMsg && (
+                        <div className="text-rose-400 text-xs text-center p-2 bg-rose-500/20 border border-rose-500/50 rounded-lg">
+                            {errorMsg}
+                        </div>
+                    )}
+                    <div className="relative rounded-xl overflow-hidden bg-black aspect-[3/4] border border-slate-700 shadow-inner">
+                        <video ref={videoRef} autoPlay playsInline className="w-full h-full object-cover" />
+                        <canvas ref={canvasRef} className="hidden" />
+                        
+                        {/* Camera Guides */}
+                        <div className="absolute inset-0 border-2 border-indigo-500/30 m-6 rounded-lg pointer-events-none border-dashed"></div>
+                        
+                        {isAnalyzing && (
+                            <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center z-10 backdrop-blur-sm">
+                                <i data-lucide="sparkles" className="w-10 h-10 text-indigo-400 animate-pulse mb-3"></i>
+                                <span className="text-white font-semibold text-sm animate-pulse tracking-wide uppercase">AI Analyzing Cover...</span>
+                            </div>
+                        )}
+                    </div>
+                    <button 
+                        onClick={captureAndAnalyze}
+                        disabled={isAnalyzing}
+                        className="w-full py-4 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-500 hover:to-purple-500 text-white font-bold rounded-xl shadow-lg shadow-indigo-900/50 flex justify-center items-center space-x-2 transition-all active:scale-95 disabled:opacity-50"
+                    >
+                        <i data-lucide="camera" className="w-5 h-5"></i>
+                        <span>Scan Cover with AI</span>
+                    </button>
+                </div>
+            );
+        };
+
         // --- Mock Data Generator for Comic Books ---
         // In a real app, you would use an API like Comic Vine or Metron.
         const generateMockComic = (barcode) => {
@@ -106,114 +275,20 @@
             };
         };
 
-        // --- Notification Component ---
-        const Notification = ({ message, type, onClose }) => {
-            useEffect(() => {
-                const timer = setTimeout(onClose, 3000);
-                return () => clearTimeout(timer);
-            }, [onClose]);
-
-            const bgColor = type === 'success' ? 'bg-green-600' : type === 'error' ? 'bg-red-600' : 'bg-blue-600';
-
-            return (
-                <div className={`fixed top-4 left-1/2 transform -translate-x-1/2 z-50 ${bgColor} text-white px-4 py-2 rounded-full shadow-lg flex items-center space-x-2 animate-bounce`}>
-                    <span className="text-sm font-medium">{message}</span>
-                </div>
-            );
-        };
-
-        // --- STREAMING_CHUNK:Implementing Camera Scanner Component ---
-        const Scanner = ({ onScan }) => {
-            const [scanning, setScanning] = useState(false);
-            const scannerRef = useRef(null);
-
-            useEffect(() => {
-                // Cleanup on unmount
-                return () => {
-                    if (scannerRef.current) {
-                        scannerRef.current.clear().catch(console.error);
-                    }
-                };
-            }, []);
-
-            const startScanner = () => {
-                setScanning(true);
-                // Delay slightly to let the UI render the #reader div
-                setTimeout(() => {
-                    const html5QrcodeScanner = new Html5Qrcode("reader");
-                    scannerRef.current = html5QrcodeScanner;
-                    
-                    const config = { fps: 10, qrbox: { width: 250, height: 150 }, aspectRatio: 1.0 };
-                    
-                    html5QrcodeScanner.start(
-                        { facingMode: "environment" }, // Use back camera on mobile
-                        config,
-                        (decodedText, decodedResult) => {
-                            // On successful scan
-                            if (window.navigator.vibrate) window.navigator.vibrate(100); // Haptic feedback
-                            html5QrcodeScanner.stop().then(() => {
-                                setScanning(false);
-                                onScan(decodedText);
-                            }).catch(console.error);
-                        },
-                        (errorMessage) => {
-                            // Ignored: continuous scanning errors (expected when no barcode is in view)
-                        }
-                    ).catch((err) => {
-                        console.error("Error starting scanner", err);
-                        alert("Camera access denied or unavailable. Please ensure permissions are granted.");
-                        setScanning(false);
-                    });
-                }, 100);
-            };
-
-            const stopScanner = () => {
-                if (scannerRef.current) {
-                    scannerRef.current.stop().then(() => {
-                        setScanning(false);
-                    }).catch(console.error);
-                }
-            };
-
-            return (
-                <div className="w-full flex flex-col items-center">
-                    {scanning && (
-                        <div className="w-full max-w-sm mx-auto mb-4 relative">
-                            <div id="reader" className="w-full rounded-xl shadow-lg border-2 border-blue-500 overflow-hidden min-h-[300px]"></div>
-                            <div className="absolute inset-0 border-4 border-dashed border-blue-400/50 rounded-xl pointer-events-none animate-pulse"></div>
-                            <p className="text-center text-sm text-slate-400 mt-2">Align UPC barcode within the frame</p>
-                        </div>
-                    )}
-                    
-                    {!scanning ? (
-                        <button 
-                            onClick={startScanner}
-                            className="w-full py-4 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-xl shadow-lg flex items-center justify-center space-x-2 transition-all active:scale-95"
-                        >
-                            <i data-lucide="camera" className="w-6 h-6"></i>
-                            <span>Tap to Scan Comic</span>
-                        </button>
-                    ) : (
-                        <button 
-                            onClick={stopScanner}
-                            className="w-full py-3 bg-red-600 hover:bg-red-700 text-white font-bold rounded-xl shadow-lg flex items-center justify-center space-x-2 transition-all active:scale-95"
-                        >
-                            <i data-lucide="x-circle" className="w-5 h-5"></i>
-                            <span>Cancel Scan</span>
-                        </button>
-                    )}
-                </div>
-            );
-        };
-
-        // --- STREAMING_CHUNK:Main App Layout and State Management ---
         const App = () => {
             const [collection, setCollection] = useState([]);
             const [currentComic, setCurrentComic] = useState(null);
             const [sheetUrl, setSheetUrl] = useState(localStorage.getItem('googleSheetUrl') || '');
+            const [geminiKey, setGeminiKey] = useState(localStorage.getItem('geminiApiKey') || '');
             const [showSettings, setShowSettings] = useState(false);
             const [notification, setNotification] = useState(null);
             const [isSaving, setIsSaving] = useState(false);
+            const [inputMode, setInputMode] = useState('cover'); // 'cover', 'barcode', or 'manual'
+
+            // Manual Entry State
+            const [manualForm, setManualForm] = useState({
+                title: '', issue: '', publisher: '', year: '', rarity: 'Standard', price: ''
+            });
 
             // Re-initialize Lucide icons when renders change
             useEffect(() => {
@@ -222,14 +297,41 @@
 
             // Handle successful barcode scan
             const handleScan = (barcode) => {
-                setNotification({ message: "Barcode detected! Looking up...", type: "info" });
+                setNotification({ message: "Barcode detected! Generating Mock Data...", type: "info" });
                 
                 // Simulate network delay for API lookup
                 setTimeout(() => {
                     const comicData = generateMockComic(barcode);
+                    comicData.isMock = true; // Flag to show user this is fake data
                     setCurrentComic(comicData);
                     setNotification(null);
                 }, 800);
+            };
+
+            const handleCoverScanResult = (comicData) => {
+                setCurrentComic(comicData);
+                setNotification({ message: "AI Analysis Complete!", type: "success" });
+            };
+
+            const handleManualSubmit = (e) => {
+                e.preventDefault();
+                if (!manualForm.title) return setNotification({ message: "Title is required", type: "error" });
+                
+                const newComic = {
+                    id: `MANUAL-${Date.now().toString().slice(-6)}`,
+                    title: manualForm.title,
+                    issue: manualForm.issue ? `#${manualForm.issue}` : 'N/A',
+                    publisher: manualForm.publisher || 'Unknown',
+                    year: manualForm.year || new Date().getFullYear(),
+                    rarity: manualForm.rarity,
+                    price: parseFloat(manualForm.price || 0),
+                    scannedAt: new Date().toISOString(),
+                    isMock: false
+                };
+                
+                setCurrentComic(newComic);
+                setManualForm({ title: '', issue: '', publisher: '', year: '', rarity: 'Standard', price: '' });
+                setNotification({ message: "Manual entry ready to save!", type: "success" });
             };
 
             // --- STREAMING_CHUNK:Google Sheets Export Logic ---
@@ -279,6 +381,7 @@
 
             const saveSettings = () => {
                 localStorage.setItem('googleSheetUrl', sheetUrl);
+                localStorage.setItem('geminiApiKey', geminiKey);
                 setShowSettings(false);
                 setNotification({ message: "Settings saved", type: "success" });
             };
@@ -303,37 +406,58 @@
                     {/* Header */}
                     <header className="bg-slate-800 p-4 border-b border-slate-700 flex justify-between items-center sticky top-0 z-10">
                         <div className="flex items-center space-x-2">
-                            <i data-lucide="book-open" className="text-blue-400 w-6 h-6"></i>
-                            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-blue-400 to-indigo-400">
-                                Comic Scanner
+                            <i data-lucide="book-open" className="text-indigo-400 w-6 h-6"></i>
+                            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-indigo-400 to-purple-400">
+                                Comic Scanner AI
                             </h1>
                         </div>
                         <button 
                             onClick={() => setShowSettings(!showSettings)}
-                            className="p-2 text-slate-400 hover:text-white transition-colors"
+                            className={`p-2 transition-colors ${showSettings ? 'text-indigo-400' : 'text-slate-400 hover:text-white'}`}
                         >
                             <i data-lucide="settings" className="w-6 h-6"></i>
                         </button>
                     </header>
 
-                    {}
+                    {/* Settings Panel */}
                     {showSettings && (
-                        <div className="p-4 bg-slate-800 border-b border-slate-700 animate-fade-in">
-                            <h2 className="text-sm font-semibold text-slate-300 mb-2 uppercase tracking-wide">Google Sheets Setup</h2>
-                            <p className="text-xs text-slate-400 mb-4">
-                                Paste your Google Apps Script Web App URL below to send scanned comics directly to a spreadsheet.
-                            </p>
-                            <input 
-                                type="url" 
-                                value={sheetUrl}
-                                onChange={(e) => setSheetUrl(e.target.value)}
-                                placeholder="https://script.google.com/macros/s/..."
-                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-white focus:ring-2 focus:ring-blue-500 outline-none mb-3"
-                            />
-                            <div className="flex space-x-2">
+                        <div className="p-4 bg-slate-800 border-b border-slate-700 animate-fade-in space-y-4">
+                            <div>
+                                <h2 className="text-sm font-semibold text-slate-300 mb-1 uppercase tracking-wide flex items-center gap-1">
+                                    <i data-lucide="table" className="w-4 h-4"></i> Google Sheets Setup
+                                </h2>
+                                <p className="text-xs text-slate-400 mb-2">
+                                    Paste your Google Apps Script Web App URL below to send comics directly to a spreadsheet.
+                                </p>
+                                <input 
+                                    type="url" 
+                                    value={sheetUrl}
+                                    onChange={(e) => setSheetUrl(e.target.value)}
+                                    placeholder="https://script.google.com/macros/s/..."
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                />
+                            </div>
+                            
+                            <div>
+                                <h2 className="text-sm font-semibold text-slate-300 mb-1 uppercase tracking-wide flex items-center gap-1">
+                                    <i data-lucide="key" className="w-4 h-4"></i> Gemini AI Key <span className="text-[10px] bg-indigo-500/20 text-indigo-300 px-1 rounded">Required for Mobile</span>
+                                </h2>
+                                <p className="text-xs text-slate-400 mb-2">
+                                    Get a free key from <a href="https://aistudio.google.com/" target="_blank" rel="noreferrer" className="text-indigo-400 underline">Google AI Studio</a> to enable cover scanning on your phone.
+                                </p>
+                                <input 
+                                    type="password" 
+                                    value={geminiKey}
+                                    onChange={(e) => setGeminiKey(e.target.value)}
+                                    placeholder="AIzaSy..."
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-sm text-white focus:ring-2 focus:ring-indigo-500 outline-none"
+                                />
+                            </div>
+
+                            <div className="flex space-x-2 pt-2">
                                 <button 
                                     onClick={saveSettings}
-                                    className="flex-1 bg-blue-600 hover:bg-blue-700 text-white py-2 rounded-lg text-sm font-medium"
+                                    className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white py-2 rounded-lg text-sm font-medium"
                                 >
                                     Save Config
                                 </button>
@@ -341,24 +465,120 @@
                         </div>
                     )}
 
+                    {/* Mode Toggle */}
+                    <div className="flex bg-slate-800 border-b border-slate-700">
+                        <button 
+                            onClick={() => { setInputMode('cover'); setCurrentComic(null); }}
+                            className={`flex-1 py-3 text-sm font-medium flex flex-col justify-center items-center space-y-1 transition-colors ${inputMode === 'cover' ? 'border-b-2 border-indigo-500 text-indigo-400' : 'text-slate-400 hover:text-slate-300'}`}
+                        >
+                            <i data-lucide="image" className="w-5 h-5"></i>
+                            <span className="text-xs">AI Cover Scan</span>
+                        </button>
+                        <button 
+                            onClick={() => { setInputMode('barcode'); setCurrentComic(null); }}
+                            className={`flex-1 py-3 text-sm font-medium flex flex-col justify-center items-center space-y-1 transition-colors ${inputMode === 'barcode' ? 'border-b-2 border-blue-500 text-blue-400' : 'text-slate-400 hover:text-slate-300'}`}
+                        >
+                            <i data-lucide="scan-line" className="w-5 h-5"></i>
+                            <span className="text-xs">Barcode</span>
+                        </button>
+                        <button 
+                            onClick={() => { setInputMode('manual'); setCurrentComic(null); }}
+                            className={`flex-1 py-3 text-sm font-medium flex flex-col justify-center items-center space-y-1 transition-colors ${inputMode === 'manual' ? 'border-b-2 border-emerald-500 text-emerald-400' : 'text-slate-400 hover:text-slate-300'}`}
+                        >
+                            <i data-lucide="keyboard" className="w-5 h-5"></i>
+                            <span className="text-xs">Manual</span>
+                        </button>
+                    </div>
+
                     {/* Main Content Area */}
                     <main className="flex-1 p-4 flex flex-col space-y-6 overflow-y-auto">
                         
-                        {/* Scanner Section */}
+                        {/* Input Section */}
                         <section>
-                            <Scanner onScan={handleScan} />
+                            {inputMode === 'cover' ? (
+                                <CoverScanner onScanResult={handleCoverScanResult} />
+                            ) : inputMode === 'barcode' ? (
+                                <Scanner onScan={handleScan} />
+                            ) : (
+                                <form onSubmit={handleManualSubmit} className="bg-slate-800 p-4 rounded-xl border border-slate-700 space-y-3 animate-fade-in">
+                                    <div>
+                                        <label className="block text-xs text-slate-400 mb-1">Comic Title *</label>
+                                        <input type="text" required placeholder="e.g. Amazing Spider-Man" 
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                            value={manualForm.title} onChange={e => setManualForm({...manualForm, title: e.target.value})}
+                                        />
+                                    </div>
+                                    <div className="flex space-x-3">
+                                        <div className="flex-1">
+                                            <label className="block text-xs text-slate-400 mb-1">Issue #</label>
+                                            <input type="text" placeholder="300" 
+                                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                                value={manualForm.issue} onChange={e => setManualForm({...manualForm, issue: e.target.value})}
+                                            />
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="block text-xs text-slate-400 mb-1">Year</label>
+                                            <input type="number" placeholder="1988" 
+                                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                                value={manualForm.year} onChange={e => setManualForm({...manualForm, year: e.target.value})}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div className="flex space-x-3">
+                                        <div className="flex-[2]">
+                                            <label className="block text-xs text-slate-400 mb-1">Publisher</label>
+                                            <input type="text" placeholder="Marvel" 
+                                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                                value={manualForm.publisher} onChange={e => setManualForm({...manualForm, publisher: e.target.value})}
+                                            />
+                                        </div>
+                                        <div className="flex-1">
+                                            <label className="block text-xs text-slate-400 mb-1">Est. Value ($)</label>
+                                            <input type="number" step="0.01" placeholder="0.00" 
+                                                className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                                value={manualForm.price} onChange={e => setManualForm({...manualForm, price: e.target.value})}
+                                            />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs text-slate-400 mb-1">Key / Variant Status</label>
+                                        <select 
+                                            className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-white focus:ring-1 focus:ring-blue-500 outline-none"
+                                            value={manualForm.rarity} onChange={e => setManualForm({...manualForm, rarity: e.target.value})}
+                                        >
+                                            <option value="Standard">Standard / Regular Cover</option>
+                                            <option value="Variant Cover">Variant Cover</option>
+                                            <option value="Key Issue">Key Issue (1st App, Death, etc.)</option>
+                                            <option value="Signed">Signed Edition</option>
+                                        </select>
+                                    </div>
+                                    <button type="submit" className="w-full mt-2 py-3 bg-blue-600 hover:bg-blue-700 text-white font-bold rounded-lg transition-colors">
+                                        Generate Entry
+                                    </button>
+                                </form>
+                            )}
                         </section>
 
                         {}
                         {currentComic && (
-                            <section className="bg-slate-800 rounded-xl p-5 border border-blue-500/30 shadow-lg shadow-blue-900/20 animate-fade-in relative overflow-hidden">
-                                <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/10 rounded-bl-full -z-0"></div>
+                            <section className="bg-slate-800 rounded-xl p-5 border border-indigo-500/30 shadow-lg shadow-indigo-900/20 animate-fade-in relative overflow-hidden">
+                                <div className="absolute top-0 right-0 w-24 h-24 bg-indigo-500/10 rounded-bl-full -z-0"></div>
                                 
                                 <div className="flex justify-between items-start relative z-10 mb-4">
                                     <div>
                                         <p className="text-xs font-semibold text-slate-400 uppercase tracking-widest">{currentComic.publisher}</p>
                                         <h2 className="text-2xl font-bold text-white leading-tight mt-1">{currentComic.title}</h2>
-                                        <p className="text-lg font-medium text-blue-400">{currentComic.issue} <span className="text-slate-500 text-sm">({currentComic.year})</span></p>
+                                        <p className="text-lg font-medium text-indigo-400">{currentComic.issue} <span className="text-slate-500 text-sm">({currentComic.year})</span></p>
+                                        {currentComic.isMock && (
+                                            <span className="inline-block mt-2 bg-rose-500/20 text-rose-400 border border-rose-500/50 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
+                                                Mock Barcode Data (Fake Result)
+                                            </span>
+                                        )}
+                                        {!currentComic.isMock && inputMode === 'cover' && (
+                                            <span className="inline-flex mt-2 items-center gap-1 bg-indigo-500/20 text-indigo-300 border border-indigo-500/50 px-2 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider">
+                                                <i data-lucide="sparkles" className="w-3 h-3 text-amber-300"></i> AI Estimated Data
+                                            </span>
+                                        )}
                                     </div>
                                     <div className="bg-slate-900 px-3 py-1 rounded-lg border border-slate-700 text-right">
                                         <p className="text-xs text-slate-400">Est. Value</p>
@@ -374,7 +594,7 @@
                                     }`}>
                                         {currentComic.rarity}
                                     </span>
-                                    <span className="text-xs text-slate-500 font-mono">UPC: {currentComic.id}</span>
+                                    <span className="text-xs text-slate-500 font-mono">ID: {currentComic.id}</span>
                                 </div>
 
                                 <div className="flex space-x-3 relative z-10">
