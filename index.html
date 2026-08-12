@@ -1,5 +1,165 @@
-<!-- ... existing code ... -->
-                                <div className="flex space-x-3 relative z-10">
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Comic Scanner AI</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <script src="https://unpkg.com/html5-qrcode" type="text/javascript"></script>
+    
+    <style>
+        body { background-color: #0f172a; color: #f8fafc; font-family: 'Inter', sans-serif; }
+        .glass-panel { background: rgba(30, 41, 59, 0.7); backdrop-filter: blur(10px); border: 1px solid rgba(255, 255, 255, 0.1); }
+        .loader { border-top-color: #8b5cf6; animation: spinner 1.5s linear infinite; }
+        @keyframes spinner { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        
+        /* Barcode Scanner specific styles */
+        #reader { width: 100%; border-radius: 0.5rem; overflow: hidden; border: none !important; }
+        #reader video { border-radius: 0.5rem; object-fit: cover; }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useRef } = React;
+
+        const App = () => {
+            const [activeTab, setActiveTab] = useState('ai');
+            const [currentComic, setCurrentComic] = useState(null);
+            const [isScanning, setIsScanning] = useState(false);
+            const [isSaving, setIsSaving] = useState(false);
+            const [history, setHistory] = useState([]);
+            const [errorMsg, setErrorMsg] = useState('');
+            const [showSettings, setShowSettings] = useState(false);
+            
+            // Settings State
+            const [apiKey, setApiKey] = useState(localStorage.getItem('comic_gemini_key') || '');
+            const [sheetUrl, setSheetUrl] = useState(localStorage.getItem('comic_sheet_url') || '');
+
+            // Ensure Lucide icons render on state changes
+            useEffect(() => {
+                lucide.createIcons();
+            });
+
+            const saveSettings = (newKey, newUrl) => {
+                localStorage.setItem('comic_gemini_key', newKey);
+                localStorage.setItem('comic_sheet_url', newUrl);
+                setApiKey(newKey);
+                setSheetUrl(newUrl);
+                setShowSettings(false);
+            };
+
+            const saveToSheet = async () => {
+                setIsSaving(true);
+                
+                try {
+                    if (sheetUrl) {
+                        await fetch(sheetUrl, {
+                            method: 'POST',
+                            body: JSON.stringify(currentComic)
+                        });
+                    } else {
+                        // Simulate network delay if no sheet is connected
+                        await new Promise(resolve => setTimeout(resolve, 800));
+                    }
+                    
+                    setHistory(prev => [currentComic, ...prev]);
+                    setCurrentComic(null);
+                } catch (err) {
+                    alert("Failed to save to sheet. Saved locally.");
+                    setHistory(prev => [currentComic, ...prev]);
+                    setCurrentComic(null);
+                }
+                
+                setIsSaving(false);
+            };
+
+            return (
+                <div className="min-h-screen flex flex-col pb-10">
+                    {/* Header */}
+                    <header className="bg-slate-900 p-4 border-b border-slate-800 flex justify-between items-center sticky top-0 z-50">
+                        <div className="flex items-center space-x-2">
+                            <i data-lucide="book-open" className="w-6 h-6 text-purple-400"></i>
+                            <h1 className="text-xl font-bold bg-clip-text text-transparent bg-gradient-to-r from-purple-400 to-indigo-400">
+                                Comic Scanner AI
+                            </h1>
+                        </div>
+                        <button onClick={() => setShowSettings(true)} className="p-2 bg-slate-800 rounded-full hover:bg-slate-700 transition-colors">
+                            <i data-lucide="settings" className="w-5 h-5 text-slate-300"></i>
+                        </button>
+                    </header>
+
+                    {/* Navigation Tabs */}
+                    <div className="flex bg-slate-900 border-b border-slate-800">
+                        {['ai', 'barcode', 'manual'].map((tab) => (
+                            <button 
+                                key={tab}
+                                onClick={() => { setActiveTab(tab); setErrorMsg(''); setCurrentComic(null); }}
+                                className={`flex-1 py-3 text-sm font-medium flex flex-col items-center gap-1 transition-colors relative ${activeTab === tab ? 'text-purple-400' : 'text-slate-400 hover:text-slate-200'}`}
+                            >
+                                <i data-lucide={tab === 'ai' ? 'image' : tab === 'barcode' ? 'scan-line' : 'keyboard'} className="w-5 h-5"></i>
+                                {tab === 'ai' ? 'AI Cover' : tab === 'barcode' ? 'Barcode' : 'Manual'}
+                                {activeTab === tab && <div className="absolute bottom-0 left-0 right-0 h-0.5 bg-purple-500"></div>}
+                            </button>
+                        ))}
+                    </div>
+
+                    <main className="flex-1 p-4 max-w-md mx-auto w-full flex flex-col gap-4">
+                        {/* Error Message Display */}
+                        {errorMsg && (
+                            <div className="bg-red-500/20 border border-red-500/50 text-red-200 p-3 rounded-lg text-sm mb-2 text-center">
+                                {errorMsg}
+                            </div>
+                        )}
+
+                        {/* Scanner Views */}
+                        {!currentComic && activeTab === 'ai' && (
+                            <AICoverScanner apiKey={apiKey} onResult={setCurrentComic} onError={setErrorMsg} isScanning={isScanning} setIsScanning={setIsScanning} />
+                        )}
+                        
+                        {!currentComic && activeTab === 'barcode' && (
+                            <BarcodeScanner onResult={setCurrentComic} onError={setErrorMsg} />
+                        )}
+
+                        {!currentComic && activeTab === 'manual' && (
+                            <ManualEntry onResult={setCurrentComic} />
+                        )}
+
+                        {/* Results View */}
+                        {currentComic && (
+                            <div className="glass-panel rounded-xl p-5 shadow-2xl animate-in slide-in-from-bottom-4">
+                                <div className="flex justify-between items-start mb-4">
+                                    <div>
+                                        <h2 className="text-2xl font-bold text-white leading-tight">{currentComic.title}</h2>
+                                        <p className="text-purple-400 font-semibold mt-1">Issue #{currentComic.issue}</p>
+                                    </div>
+                                    <div className="bg-emerald-500/20 px-3 py-1 rounded-full border border-emerald-500/30">
+                                        <span className="text-emerald-400 font-bold">{currentComic.price}</span>
+                                    </div>
+                                </div>
+
+                                <div className="space-y-3 mb-6 bg-slate-800/50 p-4 rounded-lg">
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400 text-sm">Publisher</span>
+                                        <span className="text-white font-medium">{currentComic.publisher}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400 text-sm">Year</span>
+                                        <span className="text-white font-medium">{currentComic.year}</span>
+                                    </div>
+                                    <div className="flex justify-between">
+                                        <span className="text-slate-400 text-sm">Rarity / Key</span>
+                                        <span className="text-white font-medium text-right text-sm">{currentComic.rarity}</span>
+                                    </div>
+                                </div>
+
+                                {}
+                                <div className="flex space-x-3">
                                     <button 
                                         onClick={() => setCurrentComic(null)}
                                         className="flex-1 py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg font-medium transition-colors"
@@ -11,24 +171,333 @@
                                         disabled={isSaving}
                                         className="flex-[2] py-3 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold flex justify-center items-center space-x-2 transition-colors disabled:opacity-50"
                                     >
+                                        {/* THIS IS THE CRUCIAL SPAN FIX FOR THE CRASH */}
                                         <span key={isSaving ? 'saving' : 'ready'} className="flex items-center justify-center">
                                             <i data-lucide={isSaving ? "loader-2" : "database"} className={`w-5 h-5 ${isSaving ? 'animate-spin' : ''}`}></i>
                                         </span>
-                                        <span>{isSaving ? 'Saving...' : 'Save to Collection'}</span>
+                                        <span>{isSaving ? 'Saving...' : 'Save Comic'}</span>
                                     </button>
                                 </div>
-                            </section>
+                            </div>
                         )}
 
-                        {}
-                        <section className="flex-1">
-<!-- ... existing code ... -->
-```
+                        {/* Session History */}
+                        {!currentComic && history.length > 0 && (
+                            <div className="mt-6">
+                                <h3 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Session History ({history.length})</h3>
+                                <div className="space-y-2">
+                                    {history.map((comic, i) => (
+                                        <div key={i} className="bg-slate-800 p-3 rounded-lg flex justify-between items-center text-sm border border-slate-700/50">
+                                            <div>
+                                                <span className="font-bold text-white block">{comic.title} #{comic.issue}</span>
+                                                <span className="text-slate-400 text-xs">{comic.publisher}</span>
+                                            </div>
+                                            <span className="text-emerald-400 font-medium">{comic.price}</span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </div>
+                        )}
+                    </main>
 
-**Steps to fix:**
-1. Open your `index.html` file on your computer.
-2. Scroll down towards the bottom (around line 380) and find the `saveToSheet` button code.
-3. Replace that button section with the updated code above (we are just adding that `span key=` line around the icon).
-4. Save, commit to GitHub Desktop, and wait a minute for Netlify to update.
+                    {/* Settings Modal */}
+                    {showSettings && (
+                        <SettingsModal 
+                            currentKey={apiKey} 
+                            currentUrl={sheetUrl} 
+                            onSave={saveSettings} 
+                            onClose={() => setShowSettings(false)} 
+                        />
+                    )}
+                </div>
+            );
+        };
 
-Once you refresh the app on your phone, clicking "Save to Collection" will smoothly transition to the loading spinner, save the comic to your history list, and clear the screen for your next scan!
+        const AICoverScanner = ({ apiKey, onResult, onError, isScanning, setIsScanning }) => {
+            const videoRef = useRef(null);
+            const [stream, setStream] = useState(null);
+
+            useEffect(() => {
+                startCamera();
+                return () => stopCamera();
+            }, []);
+
+            const startCamera = async () => {
+                try {
+                    const mediaStream = await navigator.mediaDevices.getUserMedia({ 
+                        video: { facingMode: 'environment' } 
+                    });
+                    if (videoRef.current) {
+                        videoRef.current.srcObject = mediaStream;
+                    }
+                    setStream(mediaStream);
+                } catch (err) {
+                    onError("Camera access denied or unavailable.");
+                }
+            };
+
+            const stopCamera = () => {
+                if (stream) {
+                    stream.getTracks().forEach(track => track.stop());
+                }
+            };
+
+            const captureAndAnalyze = async () => {
+                if (!apiKey) {
+                    onError("Gemini API key is required in Settings for AI Scanning.");
+                    return;
+                }
+                
+                setIsScanning(true);
+                onError('');
+
+                try {
+                    const video = videoRef.current;
+                    const canvas = document.createElement('canvas');
+                    
+                    // COMPRESSION FIX: Resize image so it doesn't crash the phone/API
+                    const MAX_WIDTH = 800;
+                    const scale = Math.min(MAX_WIDTH / video.videoWidth, 1);
+                    canvas.width = video.videoWidth * scale;
+                    canvas.height = video.videoHeight * scale;
+                    
+                    const ctx = canvas.getContext('2d');
+                    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+                    
+                    // Get compressed Base64
+                    const base64Image = canvas.toDataURL('image/jpeg', 0.8).split(',')[1];
+
+                    // GEMINI 3.6 FLASH FIX & STRICT JSON
+                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            contents: [{
+                                parts: [
+                                    { text: "Analyze this comic book cover. Return ONLY a raw JSON object with no markdown formatting. The JSON must have these exact keys: 'title', 'issue', 'publisher', 'year', 'rarity' (describe condition/key notes briefly), and 'price' (estimated raw value like '$15.00'). If you cannot read it clearly, guess to the best of your ability." },
+                                    { inline_data: { mime_type: "image/jpeg", data: base64Image } }
+                                ]
+                            }]
+                        })
+                    });
+
+                    const data = await response.json();
+                    
+                    if (data.error) {
+                        throw new Error(data.error.message);
+                    }
+
+                    // Parse the JSON returned by the AI
+                    const rawText = data.candidates[0].content.parts[0].text;
+                    const cleanJsonStr = rawText.replace(/```json/g, '').replace(/```/g, '').trim();
+                    const comicData = JSON.parse(cleanJsonStr);
+
+                    stopCamera();
+                    onResult({ ...comicData, source: 'AI Scan' });
+
+                } catch (err) {
+                    console.error(err);
+                    onError(`Analysis failed: ${err.message}. Please ensure the cover is clearly visible and your API key is valid.`);
+                }
+                
+                setIsScanning(false);
+            };
+
+            return (
+                <div className="flex flex-col gap-4">
+                    <div className="relative rounded-xl overflow-hidden bg-black aspect-[3/4] border border-slate-700 shadow-inner">
+                        <video 
+                            ref={videoRef} 
+                            autoPlay 
+                            playsInline 
+                            muted
+                            className="w-full h-full object-cover"
+                        ></video>
+                        
+                        {/* Scanner overlay graphic */}
+                        <div className="absolute inset-0 border-2 border-purple-500/30 m-8 rounded-lg pointer-events-none">
+                            <div className="absolute top-0 left-0 w-4 h-4 border-t-2 border-l-2 border-purple-400"></div>
+                            <div className="absolute top-0 right-0 w-4 h-4 border-t-2 border-r-2 border-purple-400"></div>
+                            <div className="absolute bottom-0 left-0 w-4 h-4 border-b-2 border-l-2 border-purple-400"></div>
+                            <div className="absolute bottom-0 right-0 w-4 h-4 border-b-2 border-r-2 border-purple-400"></div>
+                        </div>
+
+                        {isScanning && (
+                            <div className="absolute inset-0 bg-slate-900/80 flex flex-col items-center justify-center backdrop-blur-sm">
+                                <div className="loader ease-linear rounded-full border-4 border-t-4 border-slate-700 h-12 w-12 mb-4"></div>
+                                <p className="text-purple-300 font-medium animate-pulse text-sm">AI Analyzing Cover...</p>
+                            </div>
+                        )}
+                    </div>
+
+                    <button 
+                        onClick={captureAndAnalyze}
+                        disabled={isScanning}
+                        className="w-full py-4 bg-purple-600 hover:bg-purple-500 text-white rounded-xl font-bold flex justify-center items-center gap-2 transition-colors disabled:opacity-50 shadow-lg shadow-purple-900/50"
+                    >
+                        <i data-lucide="camera" className="w-5 h-5"></i>
+                        {isScanning ? 'Processing...' : 'Scan Cover'}
+                    </button>
+                </div>
+            );
+        };
+
+        const BarcodeScanner = ({ onResult, onError }) => {
+            useEffect(() => {
+                const scanner = new Html5QrcodeScanner("reader", { 
+                    qrbox: { width: 250, height: 100 }, 
+                    fps: 10,
+                    aspectRatio: 1.0 
+                });
+
+                scanner.render(
+                    (decodedText) => {
+                        scanner.clear();
+                        // Generate mock deterministic data based on the barcode string
+                        const hash = decodedText.split('').reduce((a, b) => { a = ((a << 5) - a) + b.charCodeAt(0); return a & a }, 0);
+                        const mockTitles = ["Amazing Spider-Man", "Batman", "X-Men", "Spawn", "Action Comics", "Saga"];
+                        const mockPublishers = ["Marvel", "DC", "Image", "Dark Horse"];
+                        
+                        onResult({
+                            barcode: decodedText,
+                            title: mockTitles[Math.abs(hash) % mockTitles.length],
+                            issue: Math.abs(hash) % 300 + 1,
+                            publisher: mockPublishers[Math.abs(hash) % mockPublishers.length],
+                            year: 1980 + (Math.abs(hash) % 43),
+                            rarity: "Standard Cover (Mock Data)",
+                            price: `$${((Math.abs(hash) % 100) + 3.99).toFixed(2)}`,
+                            source: 'Barcode'
+                        });
+                    },
+                    (error) => {
+                        // ignore background scanning errors
+                    }
+                );
+
+                return () => {
+                    scanner.clear().catch(console.error);
+                };
+            }, []);
+
+            return (
+                <div className="flex flex-col gap-4">
+                    <div className="bg-slate-800 p-2 rounded-xl">
+                        <div id="reader"></div>
+                    </div>
+                    <p className="text-center text-xs text-slate-400">
+                        Scan the UPC barcode. Note: Because standard barcode APIs are private, this will return mock data for testing.
+                    </p>
+                </div>
+            );
+        };
+
+        const ManualEntry = ({ onResult }) => {
+            const handleSubmit = (e) => {
+                e.preventDefault();
+                const formData = new FormData(e.target);
+                onResult({
+                    title: formData.get('title'),
+                    issue: formData.get('issue'),
+                    publisher: formData.get('publisher'),
+                    year: formData.get('year'),
+                    rarity: formData.get('rarity'),
+                    price: formData.get('price'),
+                    source: 'Manual'
+                });
+            };
+
+            return (
+                <form onSubmit={handleSubmit} className="space-y-3 bg-slate-800 p-5 rounded-xl border border-slate-700">
+                    <div>
+                        <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Title</label>
+                        <input name="title" required className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="e.g. Uncanny X-Men" />
+                    </div>
+                    <div className="flex gap-3">
+                        <div className="flex-1">
+                            <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Issue</label>
+                            <input name="issue" type="number" required className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="e.g. 266" />
+                        </div>
+                        <div className="flex-1">
+                            <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Year</label>
+                            <input name="year" type="number" className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="1990" />
+                        </div>
+                    </div>
+                    <div className="flex gap-3">
+                        <div className="flex-1">
+                            <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Publisher</label>
+                            <input name="publisher" className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="Marvel" />
+                        </div>
+                        <div className="flex-1">
+                            <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Price</label>
+                            <input name="price" className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="$150.00" />
+                        </div>
+                    </div>
+                    <div>
+                        <label className="text-xs text-slate-400 uppercase font-bold tracking-wider">Notes / Rarity</label>
+                        <input name="rarity" className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white mt-1" placeholder="1st App Gambit" />
+                    </div>
+                    <button type="submit" className="w-full py-3 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg font-bold mt-2">
+                        Add Comic
+                    </button>
+                </form>
+            );
+        };
+
+        const SettingsModal = ({ currentKey, currentUrl, onSave, onClose }) => {
+            const [keyInput, setKeyInput] = useState(currentKey);
+            const [urlInput, setUrlInput] = useState(currentUrl);
+
+            return (
+                <div className="fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-[100] backdrop-blur-sm">
+                    <div className="bg-slate-800 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl p-6">
+                        <div className="flex justify-between items-center mb-6">
+                            <h2 className="text-xl font-bold text-white flex items-center gap-2">
+                                <i data-lucide="settings" className="w-5 h-5"></i> Settings
+                            </h2>
+                            <button onClick={onClose} className="text-slate-400 hover:text-white">
+                                <i data-lucide="x" className="w-6 h-6"></i>
+                            </button>
+                        </div>
+                        
+                        <div className="space-y-4">
+                            <div>
+                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">Gemini AI Key</label>
+                                <input 
+                                    type="password"
+                                    value={keyInput}
+                                    onChange={(e) => setKeyInput(e.target.value)}
+                                    placeholder="AIzaSy..." 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white text-sm" 
+                                />
+                                <p className="text-[10px] text-slate-500 mt-1">Required for AI Cover Scanning.</p>
+                            </div>
+                            
+                            <div>
+                                <label className="text-xs font-bold text-slate-400 uppercase tracking-wider block mb-1">Google App Script URL</label>
+                                <input 
+                                    type="text"
+                                    value={urlInput}
+                                    onChange={(e) => setUrlInput(e.target.value)}
+                                    placeholder="https://script.google.com/macros/s/..." 
+                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white text-sm" 
+                                />
+                                <p className="text-[10px] text-slate-500 mt-1">Leave blank to just save to local session history.</p>
+                            </div>
+                        </div>
+
+                        <button 
+                            onClick={() => onSave(keyInput, urlInput)}
+                            className="w-full py-3 bg-purple-600 hover:bg-purple-500 text-white rounded-lg font-bold mt-6 transition-colors"
+                        >
+                            Save Configuration
+                        </button>
+                    </div>
+                </div>
+            );
+        };
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
