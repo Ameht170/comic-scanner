@@ -305,7 +305,10 @@
                                     <input 
                                         type="password" 
                                         value={apiKey}
-                                        onChange={(e) => setApiKey(e.target.value)}
+                                        onChange={(e) => {
+                                            setApiKey(e.target.value);
+                                            localStorage.setItem('geminiApiKey', e.target.value);
+                                        }}
                                         className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-purple-500 outline-none"
                                         placeholder="AIzaSy..."
                                     />
@@ -315,20 +318,19 @@
                                     <input 
                                         type="text" 
                                         value={scriptUrl}
-                                        onChange={(e) => setScriptUrl(e.target.value)}
+                                        onChange={(e) => {
+                                            setScriptUrl(e.target.value);
+                                            localStorage.setItem('sheetScriptUrl', e.target.value);
+                                        }}
                                         className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-purple-500 outline-none"
                                         placeholder="https://script.google.com/macros/..."
                                     />
                                 </div>
                                 <button 
-                                    onClick={() => {
-                                        localStorage.setItem('geminiApiKey', apiKey);
-                                        localStorage.setItem('sheetScriptUrl', scriptUrl);
-                                        setShowSettings(false);
-                                    }}
+                                    onClick={() => setShowSettings(false)}
                                     className="w-full bg-purple-600 py-2 rounded-lg text-sm font-bold text-white hover:bg-purple-700 transition-colors"
                                 >
-                                    Save Config
+                                    Close Settings
                                 </button>
                             </div>
                         </div>
