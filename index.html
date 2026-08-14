@@ -84,7 +84,7 @@
                         body: JSON.stringify({
                             contents: [{
                                 parts: [
-                                    { text: "Act as an expert comic book appraiser. Analyze this comic cover. Read the title, issue number, publisher, and year. CRITICAL: Distinguish the specific cover variant. Look for text like 'Variant Edition', 'Cover B', '1:10', or use the art/signatures to identify the specific artist variant (e.g., 'Skottie Young Variant'). 1. Append the variant letter or identifier to the issue number (e.g., '1B' or '1 Variant'). 2. Put the FULL detailed cover identification (e.g., 'Cover B - Jim Lee Variant') in the 'rarity' field. Estimate a raw market price. Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, price." },
+                                    { text: "Act as an expert comic book appraiser and OCR specialist. Analyze this comic cover. Read the exact title, issue number, publisher, and year literally from the text printed on the cover. CRITICAL FOR VARIANTS: If the cover indicates a variant edition, carefully inspect the unique art style, character drawing, coloring, and artist signatures in the corners to identify the specific cover artist (e.g., Peach Momoko, Skottie Young, Jim Lee). Do not default to a common artist; verify the distinct art style. Put the full detailed cover identification (e.g., 'Cover B - Peach Momoko Variant') in the 'rarity' field, and ensure the issue number includes any variant letter if present (e.g., '1B'). Estimate a raw market price. Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, price." },
                                     { inlineData: { mimeType: "image/jpeg", data: base64Image } }
                                 ]
                             }],
@@ -101,7 +101,6 @@
                        throw new Error("AI Safety filter triggered or invalid response. Please ensure the cover is clear and well-lit.");
                     }
 
-                    // Added a markdown cleaner just in case the AI wraps the JSON in formatting
                     let resultText = data.candidates[0].content.parts[0].text;
                     resultText = resultText.replace(/```json/gi, '').replace(/```/g, '').trim();
                     
@@ -109,7 +108,7 @@
                     onResult(resultJson);
                 } catch (err) {
                     console.error(err);
-                    let errorMsg = "Failed to analyze image. Ensure your key is valid and the cover is clear.";
+                    let errorMsg = "Failed to analyze image. Ensure your key is valid and the text on the cover is clear.";
                     if (err.message) errorMsg = err.message;
                     onError(errorMsg);
                     setImageSrc(null); // Reset image on error so they can try again
@@ -150,7 +149,6 @@
 
             const startScanning = () => {
                 setScanning(true);
-                // Slight delay ensures the div is rendered before attaching camera
                 setTimeout(() => {
                     const scanner = new Html5Qrcode("reader");
                     scannerRef.current = scanner;
@@ -158,7 +156,6 @@
                         { facingMode: "environment" },
                         { fps: 10, qrbox: { width: 250, height: 150 } },
                         (decodedText) => {
-                            // CRITICAL FIX: Stop the camera completely BEFORE updating parent state
                             scanner.stop().then(() => {
                                 setScanning(false);
                                 onResult(decodedText);
@@ -184,7 +181,6 @@
                 }
             };
 
-            // Emergency cleanup on unmount
             React.useEffect(() => {
                 return () => {
                     if (scannerRef.current) {
@@ -234,9 +230,8 @@
             };
 
             const handleBarcodeScan = (barcode) => {
-                // Mock database with your exact scanned comic + dynamic fallback
                 const mockDb = {
-                    "759606213368": { title: "Ultimate Endgame", issue: "1", publisher: "Marvel", year: "2025", rarity: "Skottie Young Variant", price: "$6.00" },
+                    "759606213368": { title: "Ultimate Endgame", issue: "1B", publisher: "Marvel", year: "2025", rarity: "Peach Momoko Variant", price: "$6.00" },
                     "759606096237": { title: "Amazing Spider-Man", issue: "300", publisher: "Marvel", year: "1988", rarity: "Key Issue, Todd McFarlane", price: "$350.00" }
                 };
                 
@@ -424,9 +419,7 @@
                                         disabled={isSaving}
                                         className="w-2/3 py-3 bg-emerald-600 disabled:bg-emerald-800 hover:bg-emerald-500 text-white rounded-xl font-bold flex items-center justify-center gap-2 transition-colors shadow-lg shadow-emerald-900/50"
                                     >
-                                        <span key={isSaving ? 'saving' : 'save'}>
-                                            {isSaving ? <Icons.Spinner /> : <Icons.Save />}
-                                        </span>
+                                        {isSaving ? <Icons.Spinner /> : <Icons.Save />}
                                         {isSaving ? 'Saving...' : 'Save Comic'}
                                     </button>
                                 </div>
