@@ -31,6 +31,7 @@
         };
 
         // --- Components ---
+
         const AICoverScanner = ({ apiKey, onResult, onError }) => {
             const [scanning, setScanning] = React.useState(false);
             const [imageSrc, setImageSrc] = React.useState(null);
@@ -77,55 +78,40 @@
                 setImageSrc(canvas.toDataURL('image/jpeg', 0.8));
 
                 try {
-                    // Restored back to the correct 3.6 model!
                     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent?key=${apiKey}`, {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({
                             contents: [{
                                 parts: [
-                                    { text: "Act strictly as an OCR text scanner. Analyze this comic book cover. Read the title, issue number, publisher, and year literally from the text printed on the cover. Do not hallucinate or guess the comic based on the art style, only use the printed words. Estimate a raw condition market price. Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, price." },
+                                    { text: "Act as an expert comic book appraiser. Analyze this comic cover. Read the title, issue number, publisher, and year. CRITICAL: Distinguish the specific cover variant. Look for text like 'Variant Edition', 'Cover B', '1:10', or use the art/signatures to identify the specific artist variant (e.g., 'Skottie Young Variant'). 1. Append the variant letter or identifier to the issue number (e.g., '1B' or '1 Variant'). 2. Put the FULL detailed cover identification (e.g., 'Cover B - Jim Lee Variant') in the 'rarity' field. Estimate a raw market price. Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, price." },
                                     { inlineData: { mimeType: "image/jpeg", data: base64Image } }
                                 ]
                             }],
                             generationConfig: { responseMimeType: "application/json" }
                         })
                     });
-                    
                     const data = await response.json();
                     
-                    // 1. Catch API-level errors (like invalid keys or Rate Limits)
                     if (data.error) {
                         throw new Error(data.error.message);
                     }
                     
-                    // 2. Catch Safety blocks (e.g. violent comic covers being blocked by AI)
-                    if (!data.candidates || data.candidates.length === 0 || !data.candidates[0].content) {
-                        throw new Error("AI rejected the image (likely triggered by safety filters on the cover art).");
+                    if (!data.candidates || data.candidates.length === 0) {
+                       throw new Error("AI Safety filter triggered or invalid response. Please ensure the cover is clear and well-lit.");
                     }
-                    
+
+                    // Added a markdown cleaner just in case the AI wraps the JSON in formatting
                     let resultText = data.candidates[0].content.parts[0].text;
-                    
-                    // 3. Clean up formatting (Sometimes the AI returns ```json even with strict rules)
                     resultText = resultText.replace(/```json/gi, '').replace(/```/g, '').trim();
                     
                     const resultJson = JSON.parse(resultText);
                     onResult(resultJson);
-                    
                 } catch (err) {
-                    console.error("Scan Error:", err);
-                    
-                    // Route the specific error message to the UI
-                    let errorMessage = "Failed to analyze image. Ensure the text on the cover is clear.";
-                    if (err.message.includes("quota") || err.message.includes("429")) {
-                        errorMessage = "Rate limit reached. Please wait a minute before scanning again.";
-                    } else if (err.name === "SyntaxError" || err.message.includes("JSON")) {
-                        errorMessage = "AI returned malformed data. Please rescan.";
-                    } else if (err.message) {
-                        errorMessage = err.message; // Uses our custom safety/API errors from above
-                    }
-                    
-                    onError(errorMessage);
+                    console.error(err);
+                    let errorMsg = "Failed to analyze image. Ensure your key is valid and the cover is clear.";
+                    if (err.message) errorMsg = err.message;
+                    onError(errorMsg);
                     setImageSrc(null); // Reset image on error so they can try again
                 } finally {
                     setScanning(false);
@@ -231,6 +217,7 @@
 
 
         // --- Main App ---
+
         const App = () => {
             const [activeTab, setActiveTab] = React.useState('ai');
             const [currentComic, setCurrentComic] = React.useState(null);
@@ -243,7 +230,7 @@
 
             const triggerError = (msg) => {
                 setError(msg);
-                setTimeout(() => setError(''), 6000); // Extended timeout slightly so it can be read
+                setTimeout(() => setError(''), 5000);
             };
 
             const handleBarcodeScan = (barcode) => {
@@ -383,7 +370,7 @@
                         </div>
                     )}
 
-                    {}
+                    {/* Main Scanner Area */}
                     <div className="px-4 flex-grow">
                         {!currentComic ? (
                             <>
@@ -447,7 +434,7 @@
                         )}
                     </div>
 
-                    {}
+                    {/* History Preview */}
                     {!currentComic && history.length > 0 && (
                         <div className="px-4 mt-8">
                             <h3 className="text-xs font-bold text-slate-500 mb-3 uppercase tracking-wider">Session History</h3>
