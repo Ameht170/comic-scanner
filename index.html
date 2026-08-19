@@ -10,6 +10,12 @@
     <script src="https://cdn.tailwindcss.com"></script>
     <!-- Barcode Scanner Library -->
     <script src="https://unpkg.com/html5-qrcode"></script>
+    <!-- Hugging Face Transformers.js (Zero-Cost Client-Side AI) -->
+    <script type="module">
+        import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.16.1';
+        env.allowLocalModels = false;
+        window.hfPipeline = pipeline;
+    </script>
     <style>
         body { background-color: #0f172a; color: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
         .tab-active { border-bottom: 2px solid #a855f7; color: #a855f7; }
@@ -42,6 +48,7 @@
             const [imageSrc, setImageSrc] = React.useState(null);
             const videoRef = React.useRef(null);
             const streamRef = React.useRef(null);
+            const classifierRef = React.useRef(null);
 
             const startCamera = async () => {
                 try {
@@ -73,7 +80,6 @@
                 if (!videoRef.current) return;
 
                 setScanning(true);
-                setStatusText('Analyzing Cover text & market value...');
                 
                 // Aggressive compression to prevent token limits
                 const canvas = document.createElement('canvas');
@@ -82,14 +88,39 @@
                 canvas.height = videoRef.current.videoHeight * scale;
                 const ctx = canvas.getContext('2d');
                 ctx.drawImage(videoRef.current, 0, 0, canvas.width, canvas.height);
-                const base64Image = canvas.toDataURL('image/jpeg', 0.6).split(',')[1];
-                setImageSrc(canvas.toDataURL('image/jpeg', 0.6));
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+                const base64Image = dataUrl.split(',')[1];
+                setImageSrc(dataUrl);
 
                 try {
+                    // --- STEP 1: Hugging Face Client-Side Pre-Check ---
+                    if (window.hfPipeline) {
+                        setStatusText('Verifying cover locally (HF)...');
+                        if (!classifierRef.current) {
+                            classifierRef.current = await window.hfPipeline('image-classification', 'Xenova/vit-base-patch16-224');
+                        }
+                        const predictions = await classifierRef.current(dataUrl);
+                        
+                        // Check if predictions resemble printed matter / books / comics
+                        const looksLikeCover = predictions.some(p => 
+                            p.label.toLowerCase().includes('comic') || 
+                            p.label.toLowerCase().includes('book') || 
+                            p.label.toLowerCase().includes('jacket') || 
+                            p.label.toLowerCase().includes('poster') ||
+                            p.label.toLowerCase().includes('paper')
+                        );
+
+                        // If confidence is totally misplaced (e.g. scanning a laptop keyboard or coffee mug)
+                        if (!looksLikeCover && predictions[0].score > 0.6) {
+                            throw new Error(`Local check failed: Detected "${predictions[0].label}". Please aim directly at a comic cover.`);
+                        }
+                    }
+
+                    // --- STEP 2: Gemini Deep Inspection & Appraisal ---
+                    setStatusText('Analyzing Cover text & market value...');
                     let resultData = null;
                     const maxRetries = 2;
                     
-                    // NEW PROMPT: Forces AI to separate face value from market value
                     const promptText = `Act as an expert comic book appraiser. Analyze this cover.
 INSTRUCTIONS:
 1. Extract title, issue number, publisher, and year.
@@ -170,7 +201,7 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                         </button>
                     </div>
                 </div>
-            )
+            );
         };
 
         const SafeBarcodeScanner = ({ apiKeyString, onResult, onError }) => {
@@ -361,7 +392,6 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                         price: currentComic.price
                     };
 
-                    // Critical Fix: Using text/plain prevents Google Sheets CORS blocking
                     await fetch(scriptUrl, {
                         method: 'POST',
                         mode: 'no-cors',
