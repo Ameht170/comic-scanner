@@ -25,12 +25,9 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        // Target Google Sheet Configuration ("comic list updated 10092026")
-        const TARGET_SHEET_URL = "https://docs.google.com/spreadsheets/d/1F_URHBLxEHwZaq0LvEZLUMeBZ2eYXVCeuFDH0DkRHdo/edit?gid=261238410#gid=261238410";
-        const TARGET_SHEET_GID = 261238410;
         const SHEET_HEADERS = ["m", "TITLE", "ISSUE", "PUBLISHER", "YEAR", "RARITY", "PRICE", "SOURCE", "", "", "Cover"];
 
-        // High-Quota Production Model Cascade (Each model has its own independent rate-limit bucket)
+        // High-Quota Production Model Cascade
         const MODEL_CASCADE = [
             "gemini-2.5-flash",
             "gemini-2.5-flash-lite",
@@ -54,7 +51,13 @@
             return keyString.split(',').map(k => k.trim()).filter(Boolean);
         };
 
-        // Robust JSON extractor to safely parse responses whether in JSON mode or Search Grounding mode
+        const isValidAppsScriptUrl = (url) => {
+            if (!url) return false;
+            const trimmed = url.trim();
+            return trimmed.startsWith("https://script.google.com/macros/s/") && trimmed.includes("/exec");
+        };
+
+        // Robust JSON extractor
         const extractCleanJSON = (rawText) => {
             if (!rawText) throw new Error("Empty response from AI.");
             const cleaned = rawText.replace(/```json/gi, '').replace(/```/g, '').trim();
@@ -84,6 +87,64 @@
             };
         };
 
+        // Verified Google Sheet Sender (Tries CORS POST -> GET Query Fallback -> Reports real status)
+        const sendRowToGoogleSheet = async (scriptUrl, comicEntry) => {
+            const cleanUrl = (scriptUrl || '').trim();
+            if (!cleanUrl) {
+                throw new Error("No Apps Script Web App URL configured in Settings.");
+            }
+            if (cleanUrl.includes("docs.google.com/spreadsheets")) {
+                throw new Error("You pasted the Google Sheet link instead of the Apps Script '/exec' Web App URL. Open Settings -> 'Need Apps Script?' to fix.");
+            }
+
+            const payload = {
+                timestamp: comicEntry.timestamp || formatSheetTimestamp(),
+                barcode: comicEntry.barcode_full || comicEntry.barcode_addon_5digit || "AI_SCAN",
+                title: comicEntry.title || "",
+                issue: comicEntry.issue || "",
+                publisher: comicEntry.publisher || "",
+                year: comicEntry.year || "",
+                rarity: comicEntry.rarity || "",
+                price: comicEntry.price || "",
+                source: comicEntry.source || "AI Scan",
+                notes: comicEntry.notes || "",
+                cover_url: comicEntry.cover_url || ""
+            };
+
+            // 1. Try standard CORS POST with text/plain (Google Apps Script natively supports CORS on text/plain POSTs)
+            try {
+                const response = await fetch(cleanUrl, {
+                    method: 'POST',
+                    redirect: 'follow',
+                    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+                    body: JSON.stringify(payload)
+                });
+
+                if (response.ok) {
+                    const text = await response.text();
+                    try {
+                        const resJson = JSON.parse(text);
+                        if (resJson.status === 'error') {
+                            throw new Error(resJson.message || "Apps Script returned an error.");
+                        }
+                        return { verified: true, row: resJson.row, sheetName: resJson.sheetName };
+                    } catch (parseErr) {
+                        // Legacy Apps Script that returns plain text instead of JSON
+                        if (text && !text.toLowerCase().includes('<!doctype html>')) {
+                            return { verified: true, row: null };
+                        }
+                    }
+                }
+            } catch (corsErr) {
+                console.warn("Standard CORS POST redirected/blocked, attempting GET query fallback...", corsErr);
+            }
+
+            // 2. Fallback: Send via GET parameter + no-cors POST so both new and legacy scripts receive the payload reliably
+            const queryUrl = `${cleanUrl}${cleanUrl.includes('?') ? '&' : '?'}payload=${encodeURIComponent(JSON.stringify(payload))}`;
+            await fetch(queryUrl, { method: 'GET', mode: 'no-cors' });
+            return { verified: false, row: null };
+        };
+
         // Zero-Wait Multi-Model & Multi-Key Cascade Caller
         const callGeminiSmartCascade = async ({ apiKeyString, preferredModel, parts, onStatusUpdate, useSearch = false }) => {
             const keys = parseKeyList(apiKeyString);
@@ -91,7 +152,6 @@
                 throw new Error("Please add your Gemini API Key in Settings first.");
             }
 
-            // Build ordered model list starting with user's preferred model
             const orderedModels = [
                 preferredModel || MODEL_CASCADE[0],
                 ...MODEL_CASCADE.filter(m => m !== (preferredModel || MODEL_CASCADE[0]))
@@ -124,9 +184,7 @@
 
                         const data = await response.json();
 
-                        // If Search Grounding caused a 429 or 400 (Search tool has a tiny separate quota), immediately retry this exact model WITHOUT search tool
                         if ((response.status === 429 || response.status === 400 || data.error) && useSearch) {
-                            console.warn(`[${modelName}] Search Grounding quota/tool rejected, falling back to fast standard mode...`);
                             const noSearchBody = {
                                 contents: [{ parts }],
                                 generationConfig: { responseMimeType: "application/json" }
@@ -150,7 +208,6 @@
                             }
                         }
 
-                        // If rate-limited (429 / 503 / quota), DO NOT sleep 8s — immediately jump to next key or next model in cascade!
                         if (
                             response.status === 429 ||
                             response.status === 503 ||
@@ -169,7 +226,6 @@
                             continue;
                         }
 
-                        // If model name not found on endpoint (404), skip to next model immediately
                         if (response.status === 404) {
                             lastError = new Error(`Model ${modelName} unavailable`);
                             continue;
@@ -212,7 +268,6 @@
             Save: () => <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M8 7H5a2 2 0 00-2 2v9a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-3m-1 4l-3 3m0 0l-3-3m3 3V4"></path></svg>,
             Spinner: () => <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>,
             Book: () => <svg className="w-7 h-7 text-purple-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253"></path></svg>,
-            Sheet: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"></path></svg>,
             Download: () => <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
         };
 
@@ -256,7 +311,6 @@
 
                 setScanning(true);
                 
-                // 800px @ 0.75 JPEG keeps barcode numbers crisp while cutting token payload in half to avoid TPM rate limits
                 const canvas = document.createElement('canvas');
                 const targetWidth = 800;
                 const scale = targetWidth / (videoRef.current.videoWidth || targetWidth);
@@ -269,7 +323,6 @@
                 setImageSrc(dataUrl);
 
                 try {
-                    // --- STEP 1: Fast Local Pre-Check ---
                     if (window.hfPipeline) {
                         setStatusText('Verifying cover locally...');
                         if (!classifierRef.current) {
@@ -291,7 +344,6 @@
                         }
                     }
 
-                    // --- STEP 2: High-Speed Vision Pass (Uses high-quota JSON mode first so it NEVER hits Search Grounding rate limits unnecessarily) ---
                     setStatusText('Analyzing Cover & Barcode...');
                     
                     const visionPrompt = `Act as an expert comic book archivist and market appraiser (Current Date: October 2026).
@@ -332,7 +384,6 @@ Return ONLY valid JSON with these exact keys:
                         useSearch: false
                     });
 
-                    // --- STEP 3: Optional Grounded Search Enrichment (Non-blocking: if Search quota is full, it keeps Step 2's result!) ---
                     const addonDecoded = decodeFiveDigitAddon(resultJson.barcode_addon_5digit);
                     const needsSearch =
                         resultJson.needs_fallback_search === true ||
@@ -586,30 +637,33 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
             const [preferredModel, setPreferredModel] = React.useState(localStorage.getItem('geminiPreferredModel') || 'gemini-2.5-flash');
             const [scriptUrl, setScriptUrl] = React.useState(localStorage.getItem('sheetScriptUrl') || '');
             const [isSaving, setIsSaving] = React.useState(false);
+            const [isSyncingAll, setIsSyncingAll] = React.useState(false);
             const [showSettings, setShowSettings] = React.useState(false);
             const [showScriptHelper, setShowScriptHelper] = React.useState(false);
             const [error, setError] = React.useState('');
             const [toast, setToast] = React.useState('');
 
-            const appsScriptBridgeCode = `function doPost(e) {
-  var ss = SpreadsheetApp.openByUrl("${TARGET_SHEET_URL}");
-  var sheet = ss.getSheets().filter(function(s) { return s.getSheetId() === ${TARGET_SHEET_GID}; })[0] || ss.getActiveSheet();
-  var d = JSON.parse(e.postData.contents);
-  // Exact 11-column schema: m | TITLE | ISSUE | PUBLISHER | YEAR | RARITY | PRICE | SOURCE | Notes | Spacer | Cover
-  sheet.appendRow([
-    d.timestamp || Utilities.formatDate(new Date(), "America/New_York", "M/d/yyyy HH:mm:ss"),
-    d.title || "",
-    d.issue || "",
-    d.publisher || "",
-    d.year || "",
-    d.rarity || "",
-    d.price || "",
-    d.source || "AI Scan",
-    d.notes || "",
-    "",
-    d.cover_url || ""
-  ]);
-  return ContentService.createTextOutput(JSON.stringify({ status: "ok" })).setMimeType(ContentService.MimeType.JSON);
+            const webhookReady = isValidAppsScriptUrl(scriptUrl);
+
+            const appsScriptBridgeCode = `function doPost(e) { return handleRequest(e); }
+function doGet(e) { return handleRequest(e); }
+
+function handleRequest(e) {
+  try {
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var sheet = ss.getSheetByName("comic list updated 09042026") || ss.getActiveSheet();
+    var d = (e.postData && e.postData.contents) ? JSON.parse(e.postData.contents) : JSON.parse(e.parameter.payload);
+    var timestamp = d.timestamp || Utilities.formatDate(new Date(), "America/New_York", "M/d/yyyy HH:mm:ss");
+    sheet.appendRow([
+      timestamp, d.title || "", d.issue || "", d.publisher || "", d.year || "",
+      d.rarity || "", d.price || "", d.source || "AI Scan", d.notes || d.barcode || "", "", d.cover_url || ""
+    ]);
+    return ContentService.createTextOutput(JSON.stringify({ status: "success", sheetName: sheet.getName(), row: sheet.getLastRow() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
 }`;
 
             const handleKeyUpdate = (e) => {
@@ -632,23 +686,21 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
 
             const triggerError = (msg) => {
                 setError(msg);
-                setTimeout(() => setError(''), 6000);
+                setTimeout(() => setError(''), 7000);
             };
 
             const triggerToast = (msg) => {
                 setToast(msg);
-                setTimeout(() => setToast(''), 4000);
+                setTimeout(() => setToast(''), 5000);
             };
 
-            const updateHistory = (newEntry) => {
-                const updated = [newEntry, ...history];
-                setHistory(updated);
+            const saveHistoryList = (newList) => {
+                setHistory(newList);
                 try {
-                    localStorage.setItem('comicScanHistory', JSON.stringify(updated));
+                    localStorage.setItem('comicScanHistory', JSON.stringify(newList));
                 } catch (e) {}
             };
 
-            // Export Session History as CSV with the exact 11-column headers of comic list updated 10092026
             const exportMatchingCSV = () => {
                 if (history.length === 0) {
                     triggerError("Scan at least one comic first to export CSV.");
@@ -687,60 +739,69 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                 const enrichedComic = {
                     ...currentComic,
                     timestamp,
-                    source: currentComic.source || "AI Scan"
+                    source: currentComic.source || "AI Scan",
+                    synced: false
                 };
 
-                if (!scriptUrl) {
-                    updateHistory(enrichedComic);
+                if (!scriptUrl || !scriptUrl.trim()) {
+                    saveHistoryList([enrichedComic, ...history]);
                     setCurrentComic(null);
-                    triggerToast("Saved to session history! (Use CSV Export or add Web App URL in Settings for live Sheet sync)");
+                    setShowSettings(true);
+                    setShowScriptHelper(true);
+                    triggerError("Saved locally ONLY! To write directly to your Google Sheet, paste your Apps Script '/exec' URL in Settings below.");
                     return;
                 }
 
                 setIsSaving(true);
                 try {
-                    const payload = {
-                        timestamp: enrichedComic.timestamp,
-                        barcode: enrichedComic.barcode_full || enrichedComic.barcode_addon_5digit || "AI_SCAN",
-                        title: enrichedComic.title,
-                        issue: enrichedComic.issue,
-                        publisher: enrichedComic.publisher,
-                        year: enrichedComic.year,
-                        rarity: enrichedComic.rarity,
-                        price: enrichedComic.price,
-                        source: enrichedComic.source,
-                        notes: enrichedComic.notes || "",
-                        cover_url: enrichedComic.cover_url || "",
-                        rowArray: [
-                            enrichedComic.timestamp,
-                            enrichedComic.title || "",
-                            enrichedComic.issue || "",
-                            enrichedComic.publisher || "",
-                            enrichedComic.year || "",
-                            enrichedComic.rarity || "",
-                            enrichedComic.price || "",
-                            enrichedComic.source || "AI Scan",
-                            enrichedComic.notes || "",
-                            "",
-                            enrichedComic.cover_url || ""
-                        ]
-                    };
-
-                    await fetch(scriptUrl, {
-                        method: 'POST',
-                        mode: 'no-cors',
-                        headers: { 'Content-Type': 'text/plain' },
-                        body: JSON.stringify(payload)
-                    });
-                    
-                    updateHistory(enrichedComic);
+                    const result = await sendRowToGoogleSheet(scriptUrl, enrichedComic);
+                    enrichedComic.synced = true;
+                    saveHistoryList([enrichedComic, ...history]);
                     setCurrentComic(null);
-                    triggerToast("Logged directly to Google Sheet!");
+
+                    if (result.verified && result.row) {
+                        triggerToast(`Verified: Saved to "${result.sheetName || 'Sheet'}" (Row #${result.row})!`);
+                    } else {
+                        triggerToast("Sent to Apps Script Webhook! (Update your Apps Script code in Settings for row-number verification)");
+                    }
                 } catch (err) {
                     console.error(err);
-                    triggerError("Failed to save to Google Sheet. Check Web App URL.");
+                    saveHistoryList([enrichedComic, ...history]);
+                    setCurrentComic(null);
+                    setShowSettings(true);
+                    triggerError(`Saved locally, but Sheet sync failed: ${err.message}`);
                 } finally {
                     setIsSaving(false);
+                }
+            };
+
+            const syncUnsyncedHistory = async () => {
+                if (!isValidAppsScriptUrl(scriptUrl)) {
+                    setShowSettings(true);
+                    setShowScriptHelper(true);
+                    triggerError("Please paste a valid 'https://script.google.com/macros/s/.../exec' URL in Settings first.");
+                    return;
+                }
+
+                setIsSyncingAll(true);
+                let syncedCount = 0;
+                const updated = [...history];
+
+                try {
+                    for (let i = updated.length - 1; i >= 0; i--) {
+                        if (!updated[i].synced) {
+                            await sendRowToGoogleSheet(scriptUrl, updated[i]);
+                            updated[i].synced = true;
+                            syncedCount++;
+                        }
+                    }
+                    saveHistoryList(updated);
+                    triggerToast(`Synced ${syncedCount} comic(s) from history to your Google Sheet!`);
+                } catch (err) {
+                    saveHistoryList(updated);
+                    triggerError(`Sync stopped: ${err.message}`);
+                } finally {
+                    setIsSyncingAll(false);
                 }
             };
 
@@ -753,14 +814,13 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                                 <h1 className="text-lg font-bold bg-gradient-to-r from-purple-400 to-pink-500 bg-clip-text text-transparent leading-tight">
                                     Comic Scanner AI
                                 </h1>
-                                <a 
-                                    href={TARGET_SHEET_URL} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="text-[10px] text-emerald-400 hover:underline flex items-center gap-1"
+                                <button
+                                    onClick={() => { setShowSettings(true); setShowScriptHelper(!webhookReady); }}
+                                    className={`text-[10px] font-semibold flex items-center gap-1 ${webhookReady ? 'text-emerald-400' : 'text-amber-400'}`}
                                 >
-                                    <Icons.Sheet /> Connected: comic list updated 10092026 ↗
-                                </a>
+                                    <span className={`w-2 h-2 rounded-full ${webhookReady ? 'bg-emerald-400' : 'bg-amber-400 animate-ping'}`}></span>
+                                    {webhookReady ? 'Webhook Active (comic list updated 10092026)' : 'Sheet Webhook Not Set (Tap to Connect)'}
+                                </button>
                             </div>
                         </div>
                         <button onClick={() => setShowSettings(!showSettings)} className="p-2 text-slate-400 hover:text-white rounded-full transition-colors">
@@ -772,19 +832,10 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                         <div className="p-4 bg-slate-800 border-b border-slate-700 animate-fade-in space-y-4">
                             <div className="flex justify-between items-center">
                                 <h2 className="font-bold text-purple-400">Configuration & Sheet Sync</h2>
-                                <a 
-                                    href={TARGET_SHEET_URL} 
-                                    target="_blank" 
-                                    rel="noopener noreferrer"
-                                    className="text-xs bg-emerald-600/20 border border-emerald-500/40 text-emerald-300 px-2.5 py-1 rounded-lg font-semibold"
-                                >
-                                    Open Target Sheet ↗
-                                </a>
                             </div>
 
                             <div>
                                 <label className="block text-xs text-amber-400 mb-1 font-bold">Gemini API Key(s)</label>
-                                <p className="text-[10px] text-slate-400 mb-2 leading-tight">Paste one or multiple keys separated by commas.</p>
                                 <input 
                                     type="password" 
                                     value={apiKey}
@@ -795,7 +846,7 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                             </div>
 
                             <div>
-                                <label className="block text-xs text-purple-300 mb-1 font-bold">Primary Gemini Model (Auto-Cascades on Quota)</label>
+                                <label className="block text-xs text-purple-300 mb-1 font-bold">Primary Gemini Model</label>
                                 <select
                                     value={preferredModel}
                                     onChange={handleModelUpdate}
@@ -804,7 +855,7 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                                     <option value="gemini-2.5-flash">gemini-2.5-flash (Recommended • High Quota)</option>
                                     <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (Fastest • Highest Quota)</option>
                                     <option value="gemini-2.0-flash">gemini-2.0-flash (Stable Fallback)</option>
-                                    <option value="gemini-3-flash-preview">gemini-3-flash-preview (Experimental • Low Quota)</option>
+                                    <option value="gemini-3-flash-preview">gemini-3-flash-preview (Experimental)</option>
                                 </select>
                             </div>
 
@@ -815,28 +866,28 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                                         onClick={() => setShowScriptHelper(!showScriptHelper)}
                                         className="text-[11px] text-purple-400 hover:underline font-medium"
                                     >
-                                        {showScriptHelper ? 'Hide Script Code' : 'Need Apps Script for this Sheet?'}
+                                        {showScriptHelper ? 'Hide Setup Code' : 'Get Apps Script Code'}
                                     </button>
                                 </div>
                                 <input 
                                     type="text" 
                                     value={scriptUrl}
                                     onChange={handleUrlUpdate}
-                                    className="w-full bg-slate-900 border border-slate-700 rounded-lg p-2 text-sm text-white focus:border-purple-500 outline-none"
+                                    className={`w-full bg-slate-900 border rounded-lg p-2 text-sm text-white outline-none ${scriptUrl && !webhookReady ? 'border-red-500' : 'border-slate-700 focus:border-purple-500'}`}
                                     placeholder="https://script.google.com/macros/s/.../exec"
                                 />
+                                {scriptUrl && !webhookReady && (
+                                    <p className="text-[11px] text-red-400 mt-1">
+                                        Must be an Apps Script Web App URL starting with <code>https://script.google.com/macros/s/</code> and ending in <code>/exec</code> (not the spreadsheet link).
+                                    </p>
+                                )}
                             </div>
 
                             {showScriptHelper && (
                                 <div className="bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs space-y-2">
                                     <p className="text-slate-300 leading-relaxed">
-                                        To auto-append directly into <strong>comic list updated 10092026</strong> (<code className="text-amber-300">A:K</code> schema: <code className="text-purple-300">m, TITLE, ISSUE, PUBLISHER, YEAR, RARITY, PRICE, SOURCE, , , Cover</code>):
+                                        Paste this inside <strong>comic list updated 10092026</strong> (<strong>Extensions → Apps Script</strong>), then click <strong>Deploy → New deployment → Web app</strong> (Access: <em>Anyone</em>):
                                     </p>
-                                    <ol className="list-decimal list-inside text-[11px] text-slate-400 space-y-1">
-                                        <li>Open your Sheet → <strong>Extensions → Apps Script</strong></li>
-                                        <li>Paste the code below & click <strong>Deploy → New deployment → Web app</strong> (Access: <em>Anyone</em>)</li>
-                                        <li>Paste the generated <code className="text-emerald-400">/exec</code> URL above.</li>
-                                    </ol>
                                     <pre className="bg-black/80 text-emerald-300 p-2 rounded overflow-x-auto text-[10px] font-mono select-all">
 {appsScriptBridgeCode}
                                     </pre>
@@ -862,7 +913,7 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                     )}
 
                     {error && (
-                        <div className="m-4 p-3 bg-red-900/50 border border-red-500/50 rounded-lg text-red-200 text-sm text-center animate-pulse">
+                        <div className="m-4 p-3 bg-red-900/60 border border-red-500/60 rounded-lg text-red-200 text-xs font-medium text-center">
                             {error}
                         </div>
                     )}
@@ -1050,11 +1101,20 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                                     Scanned Comics ({history.length})
                                 </h3>
                                 <div className="flex gap-2">
+                                    {history.some(h => !h.synced) && (
+                                        <button
+                                            onClick={syncUnsyncedHistory}
+                                            disabled={isSyncingAll}
+                                            className="text-xs bg-emerald-600/20 border border-emerald-500/40 hover:bg-emerald-600/30 text-emerald-300 px-2.5 py-1 rounded-lg font-semibold flex items-center gap-1 transition-colors"
+                                        >
+                                            {isSyncingAll ? 'Syncing...' : 'Sync Unsaved to Sheet'}
+                                        </button>
+                                    )}
                                     <button
                                         onClick={exportMatchingCSV}
                                         className="text-xs bg-purple-600/20 border border-purple-500/40 hover:bg-purple-600/30 text-purple-300 px-2.5 py-1 rounded-lg font-semibold flex items-center gap-1 transition-colors"
                                     >
-                                        <Icons.Download /> Export Sheet CSV
+                                        <Icons.Download /> CSV
                                     </button>
                                 </div>
                             </div>
@@ -1062,7 +1122,10 @@ Return ONLY valid JSON with keys: title, issue, publisher, year, rarity, origina
                                 {history.map((comic, idx) => (
                                     <div key={idx} className="bg-slate-800/60 border border-slate-700 p-3 rounded-lg flex justify-between items-center gap-2">
                                         <div className="min-w-0">
-                                            <p className="font-bold text-sm text-white truncate">{comic.title} #{comic.issue}</p>
+                                            <div className="flex items-center gap-1.5">
+                                                <span className={`w-2 h-2 rounded-full flex-shrink-0 ${comic.synced ? 'bg-emerald-400' : 'bg-amber-400'}`} title={comic.synced ? 'Synced to Sheet' : 'Saved locally only'}></span>
+                                                <p className="font-bold text-sm text-white truncate">{comic.title} #{comic.issue}</p>
+                                            </div>
                                             <p className="text-xs text-slate-400 truncate">{comic.publisher} ({comic.year}) • {comic.rarity}</p>
                                             <p className="text-[10px] text-slate-500 font-mono">{comic.timestamp}</p>
                                         </div>
